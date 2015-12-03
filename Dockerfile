@@ -26,5 +26,11 @@ COPY dict /usr/share/dict
 COPY bin /usr/local/bin
 COPY rc /root
 
+# FIXME: Temporary to test https://github.com/thbkrkr/docker-machine-driver-ovh
+RUN wget -q "https://circle-artifacts.com/gh/andyshinn/alpine-pkg-glibc/6/artifacts/0/home/ubuntu/alpine-pkg-glibc/packages/x86_64/glibc-2.21-r2.apk" && \
+    apk --update add --allow-untrusted glibc-2.21-r2.apk
+COPY dm-bin-98a1c8c /usr/local/bin
+COPY dm-bin-driver-ovh-e032fdc /usr/local/bin
+
 WORKDIR /ops
 CMD ["zsh"]

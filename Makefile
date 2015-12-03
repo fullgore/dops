@@ -1,5 +1,5 @@
 NAME = krkr/dops
-VERSION = 0.1.0
+VERSION = ovh
 
 build: build-base-image build-image
 
