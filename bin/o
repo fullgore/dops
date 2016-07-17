@@ -1,0 +1,229 @@
+#!/bin/bash -eu
+
+nb_nodes() {
+  docker-machine ls -q | wc -l
+}
+
+current_ip() {
+  docker-machine ip $DOCKER_MACHINE_NAME
+}
+
+parallel() {
+  for m in $(docker-machine ls -q)
+  do
+    DOCKER_HOST=tcp://$(docker-machine ip $m):2376
+    DOCKER_MACHINE_NAME=$m
+    DOCKER_TLS_VERIFY=1
+    DOCKER_CERT_PATH=/ops/machine/machines/$m
+    #$@ | tee .$m.log > /dev/null &
+    $@ &> .$m.log &
+  done
+  wait
+  for m in $(docker-machine ls -q)
+  do
+    echo -e ">\e[36m machine=\e[35m$m \e[36mcmd=\e[35m$@ \e[0m"
+    cat .$m.log; rm .$m.log
+  done
+}
+
+parallel_ssh() {
+  for m in $(docker-machine ls -q)
+  do
+    DOCKER_HOST=tcp://$(docker-machine ip $m):2376
+    DOCKER_MACHINE_NAME=$m
+    DOCKER_TLS_VERIFY=1
+    DOCKER_CERT_PATH=/ops/machine/machines/$m
+    docker-machine ssh $m sudo $@ | tee .$m.log > /dev/null &
+  done
+  wait
+  for m in $(docker-machine ls -q)
+  do
+    echo -e ">\e[36m machine=\e[35m$m \e[36mcmd=\e[35m$@ \e[0m"
+    cat .$m.log
+    echo
+  done
+}
+
+machine() {
+  local cmd=${1:-""} && shift || true
+  case $cmd in
+    c|create)
+      local force=${1:-"no"}
+      declare num=$(( $(nb_nodes) + 1 ))
+      declare name=n$num
+
+      if [[ "$force" != "-f" ]]; then
+        echo docker-machine create -d ovh \
+          -engine-install-url="https://experimental.docker.com" \
+          $name
+        echo "Are you sure? (y/n)"; read p; [[ "$p" != "y" ]] && exit 0
+      fi
+
+      docker-machine create -d ovh \
+        -engine-install-url="https://experimental.docker.com" \
+        $name  2>&1 | tee -a /ops/machine/create_$name.log > /dev/null &
+
+      sleep 0.5
+      echo "> tail /ops/machine/create_$name.log (CTRL+C to exit)"
+      tail -f /ops/machine/create_$name.log
+    ;;
+    "")
+      echo 'Usage: o machine COMMAND [arg...]
+
+Commands:
+  create
+
+  or docker-machine commands'
+    ;;
+    *)
+      docker-machine $cmd $@
+    ;;
+  esac
+}
+
+logs() {
+  local cmd=${1:-""} && shift || true; case $cmd in
+    stream-node)
+      curl $(current_ip):8000/logs
+      ;;
+    s|stream)
+      declare grepPattern=${1:-""}
+      [[ $grepPattern != "" ]] && grepPattern="-grep=$grepPattern"
+      ./ologs-ws -url=laas.runabove.com/v2/broker/?topics=c002.log1 -token=ffff3ed5-027f-444c-891e-d26f75427f96 \
+        $grepPattern
+    ;;
+    q|query)
+      declare query=${1:-*} url="https://laas.runabove.com:12900/search/universal/relative"
+      curl -s -u ${OVH_LOGS_READ_TOKEN}:token \
+        "$url?range=3600&filter=streams%${OVH_LOGS_STREAM}&limit=10&sort=timestamp%3Adesc&query=$query" \
+        | jq '.messages[].message | {source:.source,timestamp:.timestamp,message:.message}'
+    ;;
+    quesry)
+      declare query=${1:-*}
+      curl -s -u ${OVH_LOGS_READ_TOKEN}:token \
+        "https://laas.runabove.com:9200/${OVH_LOGS_ALIAS}/_search?query=$query" \
+        | jq '.hits.hits[]._source | {source:.source,timestamp:.timestamp,message:.message}'
+    ;;
+    "")
+      echo 'Usage: o logs COMMAND [arg...]
+
+Commands:
+  stream
+
+  or docker-compose commands'
+    ;;
+    *)
+      parallel docker-compose -p o_logs -f /o/tpl/logs_agent.yml $cmd $@
+    ;;
+  esac
+}
+
+metrics_list() {
+  curl -s -u $OVH_METRICS_READ_TOKEN "$OVH_METRICS_URL/api/suggest?max=1000&q=&type=metrics" \
+  | jq -rc '.[]'
+  # curl -s 'http://influxdb.n3.blurb.space:8086/query?q=SHOW+MEASUREMENTS&db=telegraf' \
+  #   | jq -rc '.results[0].series[0].values[][]'
+}
+
+metrics_query() {
+  declare metric=$1
+  curl -s -u $OVH_METRICS_READ_TOKEN "$OVH_METRICS_URL/api/query" -d '{
+    "start": '$(( $(date +%s) - 600))',
+    "queries":[
+      {"metric":"'$1'","aggregator":"none"}
+    ]
+  }' | jq .
+}
+
+metrics() {
+  local cmd=${1:-""} && shift || true
+  case $cmd in
+    list)
+      metrics_list
+    ;;
+    query)
+      metrics_query "$@"
+    ;;
+    "")
+      echo 'Usage: o metrics COMMAND [arg...]
+
+Commands:
+  list
+  query
+
+  or docker-compose commands'
+      ;;
+    *)
+      parallel docker-compose -p o_metrics -f /o/tpl/metrics_agent.yml $cmd $@
+    ;;
+  esac
+}
+
+service() {
+  local cmd=${1:-""} && shift || true
+  case $cmd in
+    i|init)
+      for s in $(ls -1 /ops/services/*.service); do
+        declare service=$(sed -r "s|.*/([a-z_]*).service|\1|" <<< $s)
+        echo "service:$service"
+        docker service create $(cat $s)
+      done
+    ;;
+    r|recreate)
+      for s in $(ls -1 /ops/services/*.service); do
+        declare service=$(sed -r "s|.*/([a-z_]*).service|\1|" <<< $s)
+        echo "service:$service"
+        docker service rm $service
+        docker service create $(cat $s)
+      done
+    ;;
+    "")
+      echo 'Usage: o metrics COMMAND [arg...]
+
+Commands:
+  init
+
+  or docker service commands'
+    ;;
+    *)
+      docker service $cmd $@
+    ;;
+  esac
+}
+
+help() {
+  echo 'Usage: o COMMAND [arg...]
+
+Commands:
+  machine   Manage machines
+  dns       Manage DNS
+  logs      Manage logs
+  metrics   Manage metrics
+  services  Manage services'
+}
+
+
+main() {
+  local cmd=${1:-""} && shift || true
+  case $cmd in
+
+    m|machine   ) machine "$@" ;;
+    d|dns       ) ons     "$@" ;;
+    l|logs      ) logs    "$@" ;;
+    mx|metrics  ) metrics "$@" ;;
+    s|service   ) service "$@" ;;
+
+    !|sync     )
+      logs up -d
+      metrics up -d
+      ;;
+
+    c|cmd       ) parallel "$@" ;;
+    k|kmd       ) parallel_ssh "$@" ;;
+    ""|help     ) help ;;
+
+    *) echo "o: '$cmd' is not an o command. See o --help." && exit 1
+  esac
+}
+
+main "$@"

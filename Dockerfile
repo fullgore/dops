@@ -31,6 +31,7 @@ COPY dict /usr/share/dict
 COPY bin /usr/local/bin
 COPY rc /root/.rc
 COPY rc/.myzshrc /root/.myzshrc
+COPY o.tpl /o/tpl
 
 WORKDIR /ops
 ENTRYPOINT ["start"]
